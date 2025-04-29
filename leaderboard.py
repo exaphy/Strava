@@ -12,7 +12,6 @@ STRAVA_CLUB_ID         = os.getenv("STRAVA_CLUB_ID")
 NOTION_TOKEN           = os.getenv("NOTION_TOKEN")
 NOTION_PARENT_PAGE_ID  = os.getenv("NOTION_PARENT_PAGE_ID")
 
-# Only date matters now
 START_DATE_STR         = os.getenv("START_DATE_STR")  # e.g. "2025-04-27"
 PACIFIC                = ZoneInfo("America/Los_Angeles")
 
@@ -36,8 +35,9 @@ def refresh_strava_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ─── FETCH RUNS ───────────────────────────────────────────────────────────────
+# ─── FETCH & DETAIL-RICHEN RUNS ───────────────────────────────────────────────
 def fetch_all_runs(token):
+    # 1) fetch summaries
     hdr, runs, page = {"Authorization":f"Bearer {token}"}, [], 1
     while True:
         r = requests.get(
@@ -52,7 +52,22 @@ def fetch_all_runs(token):
         runs.extend(a for a in batch if a.get("type")=="Run")
         page += 1
         time.sleep(0.5)
-    return runs
+
+    # 2) for any run missing start_date_local or athlete.id, fetch full details
+    detailed = []
+    for a in runs:
+        need_fetch = ("start_date_local" not in a) or ("athlete" not in a) or ("id" not in a["athlete"])
+        if need_fetch:
+            act_id = a.get("id")
+            print(f"🐛 fetching full details for activity id {act_id}")
+            rd = requests.get(f"https://www.strava.com/api/v3/activities/{act_id}",
+                              headers={"Authorization":f"Bearer {token}"})
+            rd.raise_for_status()
+            detailed.append(rd.json())
+            time.sleep(0.2)  # small pause to respect rate limits
+        else:
+            detailed.append(a)
+    return detailed
 
 # ─── UTILITIES ────────────────────────────────────────────────────────────────
 def format_hhmmss(sec:int)->str:
@@ -80,8 +95,8 @@ def create_notion_database(title, schema):
 def push_rows(db_id, rows):
     for row in rows:
         props = {
-            "Athlete":       {"title":     [{"text":{"content":row["name"]}}]},
-            "Distance (mi)": {"number":    round(row["miles"],2)},
+            "Athlete":       {"title":[{"text":{"content":row["name"]}}]},
+            "Distance (mi)": {"number":round(row["miles"],2)},
             "Moving Time":   {"rich_text":[{"text":{"content":row["moving"]}}]},
             "Elapsed Time":  {"rich_text":[{"text":{"content":row["elapsed"]}}]},
         }
@@ -93,40 +108,39 @@ def push_rows(db_id, rows):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    # Parse the date boundaries in PT
+    # date bounds in PT
     start_dt = datetime.fromisoformat(START_DATE_STR).replace(tzinfo=PACIFIC)
     end_dt   = start_dt + timedelta(days=1)
     print(f"🗓️  Syncing all club runs on {start_dt.date()} (PT)")
 
-    # Auth + fetch
+    # auth & fetch
     token = refresh_strava_token()
     runs  = fetch_all_runs(token)
-    print(f"🔍  Fetched {len(runs)} runs total")
+    print(f"🔍  Fetched & detailed {len(runs)} runs total")
 
-    # Filter & group by activity name
+    # filter & group
     groups = {}
     for a in runs:
         local = parser.isoparse(a["start_date_local"]).astimezone(PACIFIC)
         if not (start_dt <= local < end_dt):
             continue
         name = a.get("name","Unnamed Activity")
-        ath  = a.get("athlete",{})
-        aid  = ath.get("id")
-        if aid is None: continue
+        ath  = a["athlete"]
+        aid  = ath["id"]
         groups.setdefault(name, {})[aid] = groups[name].get(aid, {
             "name": f"{ath.get('firstname','')} {ath.get('lastname','')}".strip(),
             "meters":0,"moving":0,"elapsed":0
         })
         rec = groups[name][aid]
-        rec["meters"]  += a.get("distance",0)
-        rec["moving"]  += a.get("moving_time",0)
-        rec["elapsed"] += a.get("elapsed_time",0)
+        rec["meters"]  += a["distance"]
+        rec["moving"]  += a["moving_time"]
+        rec["elapsed"] += a["elapsed_time"]
 
     if not groups:
         print("⚠️ No runs found on that date. Exiting.")
         return
 
-    # Schema for every new DB
+    # schema
     schema = {
         "Athlete":       {"title": {}},
         "Distance (mi)": {"number":{"format":"number"}},
@@ -134,12 +148,11 @@ def main():
         "Elapsed Time":  {"rich_text": {}},
     }
 
-    # Create one DB per distinct activity
+    # one DB per activity
     for activity_name, athletes in groups.items():
         title = f"{activity_name} – {start_dt.strftime('%-m/%-d/%Y')}"
         db_id = create_notion_database(title, schema)
 
-        # Build rows
         rows = []
         for v in athletes.values():
             rows.append({
