@@ -77,20 +77,17 @@ def aggregate_distances(runs: list[dict]) -> list[dict]:
 # ─── Notion: Activities Log ────────────────────────────────────────────────────
 def create_activity_page():
     now = datetime.now()
-    time_str = now.strftime("%H:%M:%S")
-    date_str = now.strftime("%-m/%-d/%Y")
-    title = f"Activity (Called {time_str} – {date_str})"
+    title = f"Activity (Called {now.strftime('%H:%M:%S')} – {now.strftime('%-m/%-d/%Y')})"
     payload = {
         "parent": {"database_id": ACTIVITIES_DB_ID},
         "properties": {
-            "Name": {                       # your Activities DB title prop
+            "Title": {                # <— use YOUR actual prop name here  
                 "title": [{"text": {"content": title}}]
             }
         }
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
     r.raise_for_status()
-    print(f"🆕 Logged Activity: “{title}”")
 
 # ─── Notion: Leaderboard Sync ──────────────────────────────────────────────────
 def archive_old_pages():
