@@ -162,6 +162,7 @@ def push_totals_row(athletes: list[dict]):
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
+    print("ENV check:", {k: os.environ.get(k) for k in ["NOTION_DB_ID","ACTIVITIES_DB_ID"]})
     print("▶️ NOTION_DB_ID:", NOTION_DB_ID)
     create_activity_page()
     token = refresh_strava_token()
