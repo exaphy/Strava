@@ -1,54 +1,40 @@
-import os
-import time
-import json
-import requests
+import os, time, requests
 from datetime import datetime
 
-# ─── Configuration (via environment variables) ─────────────────────────────────
-STRAVA_CLIENT_ID     = os.getenv("STRAVA_CLIENT_ID")
-STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
-STRAVA_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
-STRAVA_CLUB_ID       = os.getenv("STRAVA_CLUB_ID")
+# ─── Configuration (from env) ──────────────────────────────────────────────────
+STRAVA_CLIENT_ID       = os.getenv("STRAVA_CLIENT_ID")
+STRAVA_CLIENT_SECRET   = os.getenv("STRAVA_CLIENT_SECRET")
+STRAVA_REFRESH_TOKEN   = os.getenv("STRAVA_REFRESH_TOKEN")
+STRAVA_CLUB_ID         = os.getenv("STRAVA_CLUB_ID")
 
-NOTION_TOKEN         = os.getenv("NOTION_TOKEN")
-NOTION_DB_ID         = os.getenv("NOTION_DB_ID")       # Leaderboard DB
-ACTIVITIES_DB_ID     = os.getenv("ACTIVITIES_DB_ID")   # Activities DB
+NOTION_TOKEN           = os.getenv("NOTION_TOKEN")
+NOTION_PARENT_PAGE_ID  = os.getenv("NOTION_PARENT_PAGE_ID")
+ACTIVITY_NAME          = os.getenv("ACTIVITY_NAME")
 
-HEADERS = {
+NOTION_VERSION         = "2022-06-28"
+NOTION_HEADERS         = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
-    "Notion-Version": "2022-06-28",
+    "Notion-Version": NOTION_VERSION,
     "Content-Type": "application/json"
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-def meters_to_miles(m: float) -> float:
-    return m * 0.000621371
+def refresh_strava_token():
+    resp = requests.post("https://www.strava.com/oauth/token", data={
+        "client_id": STRAVA_CLIENT_ID,
+        "client_secret": STRAVA_CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": STRAVA_REFRESH_TOKEN
+    })
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
-def format_miles(miles: float) -> str:
-    return f"{miles:.2f}"
-
-def refresh_strava_token() -> str:
-    r = requests.post(
-        "https://www.strava.com/oauth/token",
-        data={
-            "client_id":     STRAVA_CLIENT_ID,
-            "client_secret": STRAVA_CLIENT_SECRET,
-            "grant_type":    "refresh_token",
-            "refresh_token": STRAVA_REFRESH_TOKEN
-        }
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-def fetch_all_runs(token: str) -> list[dict]:
-    runs = []
-    page = 1
-    headers = {"Authorization": f"Bearer {token}"}
+def fetch_all_runs(token):
+    hdr, runs, page = {"Authorization": f"Bearer {token}"}, [], 1
     while True:
         r = requests.get(
             f"https://www.strava.com/api/v3/clubs/{STRAVA_CLUB_ID}/activities",
-            headers=headers,
-            params={"page": page, "per_page": 200}
+            headers=hdr, params={"page": page, "per_page": 200}
         )
         r.raise_for_status()
         batch = r.json()
@@ -59,131 +45,99 @@ def fetch_all_runs(token: str) -> list[dict]:
         time.sleep(0.5)
     return runs
 
-def aggregate_distances(runs: list[dict]) -> list[dict]:
-    totals = {}
-    for a in runs:
-        athlete = a.get("athlete") or {}
-        aid = athlete.get("id")
-        if aid is None:
-            print("⚠️ Skipping activity missing athlete id:", a)
-            continue
-        name = f"{athlete.get('firstname','')} {athlete.get('lastname','')}".strip()
-        dist_m = a.get("distance", 0.0)
-        if aid not in totals:
-            totals[aid] = {"name": name, "meters": 0.0}
-        totals[aid]["meters"] += dist_m
+def format_hhmmss(sec:int):
+    h, rem = divmod(sec, 3600)
+    m, s   = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
-    athletes = []
-    for v in totals.values():
-        miles = meters_to_miles(v["meters"])
-        athletes.append({"name": v["name"], "miles": miles})
-    return sorted(athletes, key=lambda x: x["miles"], reverse=True)
+def meters_to_miles(m:float)->float:
+    return m * 0.000621371
 
-# ─── Notion: Activities Log (DEBUGGING ENABLED) ────────────────────────────────
-def create_activity_page():
-    now = datetime.now()
-    time_str = now.strftime("%H:%M:%S")
-    date_str = now.strftime("%-m/%-d/%Y")
-    title = f"Activity (Called {time_str} – {date_str})"
+# ─── Core Logic ────────────────────────────────────────────────────────────────
+def create_notion_database(title, schema_props):
+    """
+    Creates a new Notion database under NOTION_PARENT_PAGE_ID,
+    with given title and properties schema.
+    Returns the new database_id.
+    """
     payload = {
-        "parent": {"database_id": ACTIVITIES_DB_ID},
-        "properties": {
-            "Name": {  # adjust if your Activities DB title prop is named differently
-                "title": [{"text": {"content": title}}]
-            }
-        }
+        "parent": {"type":"page_id", "page_id": NOTION_PARENT_PAGE_ID},
+        "title": [{"type":"text","text":{"content": title}}],
+        "properties": schema_props
     }
-
-    print("▶️ ACTIVITIES_DB_ID:", ACTIVITIES_DB_ID)
-    print("▶️ POST /v1/pages payload:")
-    print(json.dumps(payload, indent=2))
-
-    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-
-    print(f"◀️ Response status: {r.status_code}")
-    try:
-        print("◀️ Response body:", json.dumps(r.json(), indent=2))
-    except ValueError:
-        print("◀️ Response text:", r.text)
-
+    r = requests.post("https://api.notion.com/v1/databases",
+                      headers=NOTION_HEADERS, json=payload)
     r.raise_for_status()
-    print(f"🆕 Created Activity page: “{title}”")
+    db = r.json()
+    return db["id"]
 
-# ─── Notion: Leaderboard Sync ──────────────────────────────────────────────────
-def archive_old_pages():
-    url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    cursor = None
-    pages = []
-    while True:
-        payload = {"page_size": 100}
-        if cursor:
-            payload["start_cursor"] = cursor
-        r = requests.post(url, headers=HEADERS, json=payload)
-        r.raise_for_status()
-        d = r.json()
-        pages.extend(d.get("results", []))
-        if not d.get("has_more"):
-            break
-        cursor = d.get("next_cursor")
-    for p in pages:
-        requests.patch(
-            f"https://api.notion.com/v1/pages/{p['id']}",
-            headers=HEADERS,
-            json={"archived": True}
-        ).raise_for_status()
-
-def push_athlete_rows(athletes: list[dict]):
-    for a in athletes:
-        payload = {
-            "parent": {"database_id": NOTION_DB_ID},
-            "properties": {
-                "Athlete": {
-                    "title": [{"text": {"content": a["name"]}}]
-                },
-                "Miles Ran": {
-                    "rich_text": [{"text": {"content": format_miles(a["miles"])}}]
-                }
-            }
-        }
-        r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-        r.raise_for_status()
-
-def push_totals_row(athletes: list[dict]):
-    total_miles = sum(a["miles"] for a in athletes)
-    payload = {
-        "parent": {"database_id": NOTION_DB_ID},
-        "properties": {
+def push_rows_to_database(db_id, rows):
+    for row in rows:
+        props = {
             "Athlete": {
-                "title": [{"text": {"content": "Totals"}}]
+                "title": [{"text":{"content": row["name"]}}]
             },
-            "Miles Ran (Total)": {
-                "rich_text": [{"text": {"content": format_miles(total_miles)}}]
+            "Distance (mi)": {
+                "number": round(row["miles"], 2)
+            },
+            "Moving Time": {
+                "rich_text":[{"text":{"content": format_hhmmss(row["moving"])}}]
+            },
+            "Elapsed Time": {
+                "rich_text":[{"text":{"content": format_hhmmss(row["elapsed"])}}]
             }
         }
-    }
-    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-    r.raise_for_status()
+        r = requests.post("https://api.notion.com/v1/pages",
+                          headers=NOTION_HEADERS,
+                          json={"parent":{"database_id":db_id},"properties":props})
+        r.raise_for_status()
 
-# ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    # Verify env
-    print("▶️ NOTION_DB_ID:", NOTION_DB_ID)
-    print("▶️ ACTIVITIES_DB_ID:", ACTIVITIES_DB_ID)
+    # 1) Fetch & filter runs
+    token = refresh_strava_token()
+    all_runs = fetch_all_runs(token)
+    event_runs = [r for r in all_runs if r.get("name")==ACTIVITY_NAME]
+    if not event_runs:
+        print(f"No runs found for activity “{ACTIVITY_NAME}”")
+        return
 
-    # Create activity log
-    create_activity_page()
+    # 2) Aggregate per athlete
+    totals = {}
+    for a in event_runs:
+        ath = a.get("athlete",{})
+        aid = ath.get("id")
+        if not aid:
+            continue
+        name = f"{ath.get('firstname','')} {ath.get('lastname','')}".strip()
+        totals.setdefault(aid, {"name":name,"moving":0,"elapsed":0,"meters":0})
+        totals[aid]["moving"]  += a.get("moving_time",0)
+        totals[aid]["elapsed"] += a.get("elapsed_time",0)
+        totals[aid]["meters"]  += a.get("distance",0.0)
 
-    # Fetch & aggregate distances
-    token    = refresh_strava_token()
-    runs     = fetch_all_runs(token)
-    athletes = aggregate_distances(runs)
+    rows = []
+    for v in totals.values():
+        rows.append({
+            "name":    v["name"],
+            "miles":   meters_to_miles(v["meters"]),
+            "moving":  v["moving"],
+            "elapsed": v["elapsed"]
+        })
 
-    # Rebuild leaderboard
-    archive_old_pages()
-    push_athlete_rows(athletes)
-    push_totals_row(athletes)
+    # 3) Create new database for this event
+    now = datetime.now()
+    db_title = f"{ACTIVITY_NAME} Results – {now.strftime('%-m/%-d/%Y')}"
+    schema = {
+        "Athlete":        {"title": {}},
+        "Distance (mi)":  {"number": {"format": "number"}},
+        "Moving Time":    {"rich_text": {}},
+        "Elapsed Time":   {"rich_text": {}},
+    }
+    new_db_id = create_notion_database(db_title, schema)
+    print("Created Notion DB:", new_db_id)
 
-    print(f"✅ Leaderboard updated: {len(athletes)} athletes + Totals (processed {len(runs)} runs)")
+    # 4) Push one page per athlete
+    push_rows_to_database(new_db_id, rows)
+    print(f"Pushed {len(rows)} rows into “{db_title}”")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
