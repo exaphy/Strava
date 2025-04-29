@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: 'Date to pull all club run activities for (YYYY-MM-DD, Pacific Time)'
+        description: 'Date to pull all club run activities for (YYYY-MM-DD)'
         required: true
   schedule:
     - cron: '0 * * * *'  # hourly automatic runs
