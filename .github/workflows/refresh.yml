@@ -15,13 +15,13 @@ jobs:
 
     # load all your Strava & Notion secrets, plus the date input
     env:
-      STRAVA_CLIENT_ID:     ${{ secrets.STRAVA_CLIENT_ID }}
-      STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
-      STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
-      STRAVA_CLUB_ID:       ${{ secrets.STRAVA_CLUB_ID }}
-      NOTION_TOKEN:         ${{ secrets.NOTION_TOKEN }}
-      NOTION_PARENT_PAGE_ID:${{ secrets.NOTION_PARENT_PAGE_ID }}
-      START_DATE_STR:       ${{ github.event.inputs.date }}
+      STRAVA_CLIENT_ID:      ${{ secrets.STRAVA_CLIENT_ID }}
+      STRAVA_CLIENT_SECRET:  ${{ secrets.STRAVA_CLIENT_SECRET }}
+      STRAVA_REFRESH_TOKEN:  ${{ secrets.STRAVA_REFRESH_TOKEN }}
+      STRAVA_CLUB_ID:        ${{ secrets.STRAVA_CLUB_ID }}
+      NOTION_TOKEN:          ${{ secrets.NOTION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+      START_DATE_STR:        ${{ github.event.inputs.date }}
 
     steps:
       - name: Check out code
