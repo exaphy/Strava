@@ -3,26 +3,20 @@ name: Sync Strava → Notion Activity by Date
 on:
   workflow_dispatch:
     inputs:
-      date:
-        description: |
-          Date to pull activities for (YYYY-MM-DD, Pacific Time).  
-          e.g. 2025-05-01
-        required: true
       activity_name:
-        description: |
-          Exact Strava activity name to sync.  
-          Choose one of (type exactly):  
-           • World Championship  
-           • Cross Country Run 1  
-           • Morning Group Run  
-           • …etc…
+        description: 'Exact Strava activity name to sync (e.g. "World Championship")'
         required: true
+      date:
+        description: 'Date to pull activities for (YYYY-MM-DD, Pacific Time)'
+        required: true
+  schedule:
+    - cron: '0 * * * *'  # hourly automatic runs
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     env:
-      # your secrets…
       STRAVA_CLIENT_ID:      ${{ secrets.STRAVA_CLIENT_ID }}
       STRAVA_CLIENT_SECRET:  ${{ secrets.STRAVA_CLIENT_SECRET }}
       STRAVA_REFRESH_TOKEN:  ${{ secrets.STRAVA_REFRESH_TOKEN }}
@@ -30,20 +24,27 @@ jobs:
       NOTION_TOKEN:          ${{ secrets.NOTION_TOKEN }}
       NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
 
-      # the inputs come in here:
-      START_DATE_STR:        ${{ github.event.inputs.date }}
-      ACTIVITY_NAME:         ${{ github.event.inputs.activity_name }}
+      ACTIVITY_NAME:        ${{ github.event.inputs.activity_name }}
+      START_DATE_STR:       ${{ github.event.inputs.date }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out code
+        uses: actions/checkout@v4
+
       - name: Dump inputs (debug)
         run: |
-          echo "DATE        = $START_DATE_STR"
-          echo "ACTIVITY    = $ACTIVITY_NAME"
+          echo "ACTIVITY_NAME  = $ACTIVITY_NAME"
+          echo "START_DATE_STR = $START_DATE_STR"
+          echo "All env vars:"
+          env
+
       - name: Set up Python
         uses: actions/setup-python@v4
-        with: python-version: '3.x'
-      - name: Install deps
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
         run: pip install requests python-dateutil
+
       - name: Run sync
         run: python leaderboard.py
