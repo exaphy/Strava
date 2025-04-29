@@ -21,7 +21,7 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ─── STRAVA AUTH WITH DEBUG ───────────────────────────────────────────────────
+# ─── STRAVA AUTH ──────────────────────────────────────────────────────────────
 def refresh_strava_token():
     payload = {
         "client_id":     STRAVA_CLIENT_ID,
@@ -29,62 +29,73 @@ def refresh_strava_token():
         "grant_type":    "refresh_token",
         "refresh_token": STRAVA_REFRESH_TOKEN
     }
-    print("▶️ Refresh payload:", payload)
+    print("▶️ Refresh payload:", {k: ("***" if "secret" in k.lower() or "refresh" in k.lower() else v)
+                                   for k,v in payload.items()})
     r = requests.post("https://www.strava.com/oauth/token", data=payload)
     print(f"◀️ Strava status: {r.status_code}, response: {r.text}")
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ─── FETCH & DETAIL-RICHEN RUNS ───────────────────────────────────────────────
+# ─── FETCH & DEBUG RUN SUMMARIES ─────────────────────────────────────────────
 def fetch_all_runs(token):
-    hdr, runs, page = {"Authorization":f"Bearer {token}"}, [], 1
+    hdr = {"Authorization": f"Bearer {token}"}
+    summaries = []
+    page = 1
 
-    # 1) fetch summary list
+    # 1) fetch summary list of club activities
     while True:
-        r = requests.get(
+        resp = requests.get(
             f"https://www.strava.com/api/v3/clubs/{STRAVA_CLUB_ID}/activities",
-            headers=hdr, params={"page":page,"per_page":200}
+            headers=hdr,
+            params={"page": page, "per_page": 200}
         )
-        if r.status_code == 401:
-            raise RuntimeError("Unauthorized: token invalid or club ID wrong")
-        r.raise_for_status()
-        batch = r.json()
+        if resp.status_code == 401:
+            raise RuntimeError("Unauthorized: check your token / club ID / scopes")
+        resp.raise_for_status()
+
+        batch = resp.json()
         if not batch:
             break
-        runs.extend(a for a in batch if a.get("type")=="Run")
+
+        # only keep Runs
+        runs_page = [a for a in batch if a.get("type") == "Run"]
+        summaries.extend(runs_page)
+        print(f"📄 Page {page}: fetched {len(batch)} activities, {len(runs_page)} runs")
         page += 1
         time.sleep(0.5)
 
-    # 2) detail-fetch only those that have an ID but miss critical fields
+    print(f"🔍 Total Run summaries fetched: {len(summaries)}")
+
+    # 2) detail‐fetch only if missing fields; skip if no ID
     detailed = []
-    for a in runs:
+    for a in summaries:
         act_id = a.get("id")
         if not act_id:
             print("⚠️ Skipping summary without id:", a)
             continue
 
-        missing = False
-        if "start_date_local" not in a:
-            missing = True
-        if "athlete" not in a or not isinstance(a["athlete"], dict) or "id" not in a["athlete"]:
-            missing = True
-
-        if missing:
-            print(f"🐛 fetching full details for activity id {act_id}")
-            rd = requests.get(f"https://www.strava.com/api/v3/activities/{act_id}",
-                              headers=hdr)
-            rd.raise_for_status()
-            detailed.append(rd.json())
-            time.sleep(0.2)
-        else:
+        # if we already have start_date_local and athlete.id, just keep it
+        if "start_date_local" in a and isinstance(a.get("athlete"), dict) and "id" in a["athlete"]:
             detailed.append(a)
+            continue
 
+        # otherwise fetch full details
+        print(f"🐛 fetching full details for activity id {act_id}")
+        rd = requests.get(f"https://www.strava.com/api/v3/activities/{act_id}", headers=hdr)
+        if rd.status_code == 404:
+            print(f"⚠️ Details not found for id {act_id}, skipping.")
+            continue
+        rd.raise_for_status()
+        detailed.append(rd.json())
+        time.sleep(0.2)
+
+    print(f"🔍 Total detailed runs available: {len(detailed)}")
     return detailed
 
 # ─── UTILITIES ────────────────────────────────────────────────────────────────
 def format_hhmmss(sec:int)->str:
-    h, rem = divmod(sec,3600)
-    m, s   = divmod(rem,60)
+    h, rem = divmod(sec, 3600)
+    m, s   = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 def meters_to_miles(m:float)->float:
@@ -107,14 +118,16 @@ def create_notion_database(title, schema):
 def push_rows(db_id, rows):
     for row in rows:
         props = {
-            "Athlete":       {"title":     [{"text":{"content":row["name"]}}]},
-            "Distance (mi)": {"number":    round(row["miles"],2)},
+            "Athlete":       {"title":[{"text":{"content":row["name"]}}]},
+            "Distance (mi)": {"number": round(row["miles"],2)},
             "Moving Time":   {"rich_text":[{"text":{"content":row["moving"]}}]},
             "Elapsed Time":  {"rich_text":[{"text":{"content":row["elapsed"]}}]}
         }
-        r = requests.post("https://api.notion.com/v1/pages",
-                          headers=HEADERS,
-                          json={"parent":{"database_id":db_id},"properties":props})
+        r = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=HEADERS,
+            json={"parent":{"database_id":db_id},"properties":props}
+        )
         r.raise_for_status()
     print(f"📝 Pushed {len(rows)} rows to DB {db_id}")
 
@@ -128,7 +141,10 @@ def main():
     # 2) auth & fetch
     token = refresh_strava_token()
     runs  = fetch_all_runs(token)
-    print(f"🔍  Fetched {len(runs)} detailed runs")
+
+    if not runs:
+        print("⚠️ No runs fetched from Strava. Check your club ID, membership, and scopes.")
+        return
 
     # 3) filter & group by activity name
     groups = {}
@@ -150,7 +166,7 @@ def main():
         rec["elapsed"] += a.get("elapsed_time",0)
 
     if not groups:
-        print("⚠️ No runs found on that date. Exiting.")
+        print("⚠️ No runs found on that date after filtering. Exiting.")
         return
 
     # 4) create & populate one DB per activity
