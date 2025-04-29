@@ -1,17 +1,44 @@
 import os, time, requests
+from datetime import datetime
 
+# Env vars you must have set:
 CLIENT_ID     = os.getenv("STRAVA_CLIENT_ID")
 CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
 CLUB_ID       = os.getenv("STRAVA_CLUB_ID")
-NOTION_TOKEN  = os.getenv("NOTION_TOKEN")
-NOTION_DB_ID  = os.getenv("NOTION_DB_ID")
+
+NOTION_TOKEN      = os.getenv("NOTION_TOKEN")
+NOTION_DB_ID      = os.getenv("NOTION_DB_ID")
+ACTIVITIES_DB_ID  = os.getenv("ACTIVITIES_DB_ID")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json"
 }
+
+def create_activity_page():
+    """Create a new Activity page titled with the current time & date."""
+    now = datetime.now()
+    time_str = now.strftime("%H:%M:%S")
+    date_str = now.strftime("%-m/%-d/%Y")
+    title   = f"Activity (Called {time_str} - {date_str})"
+
+    payload = {
+        "parent": {"database_id": ACTIVITIES_DB_ID},
+        "properties": {
+            "Title": {                       # or "Name" if you left the default
+                "title": [{
+                    "text": {"content": title}
+                }]
+            }
+        }
+    }
+    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
+    r.raise_for_status()
+    page_id = r.json()["id"]
+    print(f"Created Activity page: {page_id} → “{title}”")
+    return page_id
 
 def refresh_strava_token():
     r = requests.post("https://www.strava.com/oauth/token", data={
@@ -24,33 +51,60 @@ def refresh_strava_token():
     return r.json()["access_token"]
 
 def fetch_runs(token):
-    hdr, page, runs = {"Authorization":f"Bearer {token}"}, 1, []
+    hdr, runs, page = {"Authorization":f"Bearer {token}"}, [], 1
     while True:
-        r = requests.get(
+        resp = requests.get(
             f"https://www.strava.com/api/v3/clubs/{CLUB_ID}/activities",
-            headers=hdr, params={"page":page,"per_page":200}
+            headers=hdr,
+            params={"page":page,"per_page":200}
         )
-        if r.status_code == 401:
+        if resp.status_code == 401:
             raise RuntimeError("Unauthorized: join the club or check scopes")
-        data = r.json()
-        if not data: break
-        runs += [a for a in data if a["type"]=="Run"]
+        batch = resp.json()
+        if not batch:
+            break
+        runs.extend(a for a in batch if a.get("type")=="Run")
         page += 1
         time.sleep(0.5)
     return runs
 
-def aggregate(runs):
-    totals = {}
+def aggregate(runs, max_athletes=200):
+    data = {}
     for a in runs:
-        name = f"{a['athlete']['firstname']} {a['athlete'].get('lastname','')}".strip()
-        secs = a.get("moving_time",0)
-        totals[name] = totals.get(name, 0) + secs
+        ath = a["athlete"]; aid = ath["id"]
+        name = f"{ath.get('firstname','')} {ath.get('lastname','')}".strip()
+        mv  = a.get("moving_time", 0)
+        el  = a.get("elapsed_time", 0)
+        if aid not in data:
+            data[aid] = {"name": name, "moving": 0, "elapsed": 0}
+        data[aid]["moving"]  += mv
+        data[aid]["elapsed"] += el
+
+    sorted_ath = sorted(data.values(), key=lambda x: x["moving"], reverse=True)[:max_athletes]
+
     rows = []
-    for name, secs in sorted(totals.items(), key=lambda x:-x[1]):
-        h, rem = divmod(secs,3600)
-        m, s    = divmod(rem,60)
-        rows.append((name, f"{h:02d}:{m:02d}:{s:02d}", round(secs/3600,2)))
-    return rows
+    grand = 0.0
+    for e in sorted_ath:
+        mv, el = e["moving"], e["elapsed"]
+        h_mv, rem_mv = divmod(mv,3600)
+        m_mv, s_mv   = divmod(rem_mv,60)
+        moving_str   = f"{h_mv:02d}:{m_mv:02d}:{s_mv:02d}"
+
+        h_el, rem_el = divmod(el,3600)
+        m_el, s_el   = divmod(rem_el,60)
+        elapsed_str  = f"{h_el:02d}:{m_el:02d}:{s_el:02d}"
+
+        hours = round(mv/3600,2)
+        grand += hours
+
+        rows.append({
+            "name":    e["name"],
+            "moving":  moving_str,
+            "elapsed": elapsed_str,
+            "hours":   hours
+        })
+
+    return rows, round(grand,2)
 
 def archive_old():
     url, cursor = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query", None
@@ -59,32 +113,40 @@ def archive_old():
         payload = {"page_size":100, **({"start_cursor":cursor} if cursor else {})}
         r = requests.post(url, headers=HEADERS, json=payload); r.raise_for_status()
         d = r.json()
-        pages += d["results"]
+        pages.extend(d["results"])
         if not d.get("has_more"): break
         cursor = d.get("next_cursor")
     for p in pages:
         requests.patch(
             f"https://api.notion.com/v1/pages/{p['id']}",
-            headers=HEADERS, json={"archived":True}
+            headers=HEADERS,
+            json={"archived": True}
         ).raise_for_status()
 
 def push_new(rows):
-    for name, tt, hrs in rows:
+    for r in rows:
         payload = {
-            "parent":{"database_id":NOTION_DB_ID},
-            "properties":{
-                "Athlete":{"title":[{"text":{"content":name}}]},
-                "Total Time":{"rich_text":[{"text":{"content":tt}}]},
-                "Total Hours":{"number":hrs}
+            "parent": {"database_id": NOTION_DB_ID},
+            "properties": {
+                "Athlete":      {"title":     [{"text":{"content":r["name"]}}]},
+                "Moving Time":  {"rich_text":[{"text":{"content":r["moving"]}}]},
+                "Elapsed Time": {"rich_text":[{"text":{"content":r["elapsed"]}}]},
+                "Total Hours":  {"number":    r["hours"]}
             }
         }
-        r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-        r.raise_for_status()
+        requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload).raise_for_status()
 
-if __name__=="__main__":
+def main():
+    # 1) Create a new “Activity” page
+    create_activity_page()
+
+    # 2) Sync leaderboard
     token = refresh_strava_token()
     runs  = fetch_runs(token)
-    rows  = aggregate(runs)
+    rows, grand = aggregate(runs)
     archive_old()
     push_new(rows)
-    print("✅ Leaderboard updated")
+    print(f"✅ Leaderboard updated for {len(rows)} athletes (grand total: {grand} hrs)")
+
+if __name__=="__main__":
+    main()
