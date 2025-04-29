@@ -1,36 +1,52 @@
-name: Sync Strava → Notion Activity
+name: Sync Strava → Notion Activity by Date
 
 on:
   workflow_dispatch:
     inputs:
       activity_name:
-        description: 'Exact name of the Strava activity to sync (e.g. "World Championship")'
+        description: 'Exact Strava activity name to sync (e.g. "World Championship")'
         required: true
-        default: 'World Championship'
+      date:
+        description: 'Date to pull activities for (YYYY-MM-DD, Pacific Time)'
+        required: true
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # hourly automatic runs (uses the default inputs from last dispatch)
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      STRAVA_CLIENT_ID:     ${{ secrets.STRAVA_CLIENT_ID }}
-      STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
-      STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
-      STRAVA_CLUB_ID:       ${{ secrets.STRAVA_CLUB_ID }}
-      NOTION_TOKEN:         ${{ secrets.NOTION_TOKEN }}
-      NOTION_PARENT_PAGE_ID:${{ secrets.NOTION_PARENT_PAGE_ID }}
 
-      # Pull the activity name from the workflow input:
-      ACTIVITY_NAME:       ${{ github.event.inputs.activity_name }}
+    # Inject secrets and workflow inputs as env vars
+    env:
+      STRAVA_CLIENT_ID:      ${{ secrets.STRAVA_CLIENT_ID }}
+      STRAVA_CLIENT_SECRET:  ${{ secrets.STRAVA_CLIENT_SECRET }}
+      STRAVA_REFRESH_TOKEN:  ${{ secrets.STRAVA_REFRESH_TOKEN }}
+      STRAVA_CLUB_ID:        ${{ secrets.STRAVA_CLUB_ID }}
+      NOTION_TOKEN:          ${{ secrets.NOTION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+
+      # Workflow inputs
+      ACTIVITY_NAME:        ${{ github.event.inputs.activity_name }}
+      START_DATE_STR:       ${{ github.event.inputs.date }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Dump inputs (debug)
+        run: |
+          echo "ACTIVITY_NAME = $ACTIVITY_NAME"
+          echo "START_DATE_STR = $START_DATE_STR"
+          echo "All env vars:"
+          env
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - name: Install deps
-        run: pip install requests
-      - name: Run sync
+
+      - name: Install dependencies
+        run: pip install requests python-dateutil
+
+      - name: Run leaderboard.py
         run: python leaderboard.py
