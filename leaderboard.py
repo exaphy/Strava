@@ -3,15 +3,15 @@ import time
 import requests
 from datetime import datetime
 
-# ─── Configuration (via environment variables) ─────────────────────────────────
+# ─── Configuration ─────────────────────────────────────────────────────────────
 STRAVA_CLIENT_ID     = os.getenv("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 STRAVA_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
 STRAVA_CLUB_ID       = os.getenv("STRAVA_CLUB_ID")
 
 NOTION_TOKEN         = os.getenv("NOTION_TOKEN")
-NOTION_DB_ID         = os.getenv("NOTION_DB_ID")         # Leaderboard DB
-ACTIVITIES_DB_ID     = os.getenv("ACTIVITIES_DB_ID")     # Sync History DB
+NOTION_DB_ID         = os.getenv("NOTION_DB_ID")       # Leaderboard DB
+ACTIVITIES_DB_ID     = os.getenv("ACTIVITIES_DB_ID")   # Activities DB
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -20,37 +20,37 @@ HEADERS = {
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-def meters_to_miles(meters: float) -> float:
-    return meters * 0.000621371
+def meters_to_miles(m: float) -> float:
+    return m * 0.000621371
 
 def format_miles(miles: float) -> str:
     return f"{miles:.2f}"
 
 def refresh_strava_token() -> str:
-    resp = requests.post(
+    r = requests.post(
         "https://www.strava.com/oauth/token",
         data={
-            "client_id": STRAVA_CLIENT_ID,
+            "client_id":     STRAVA_CLIENT_ID,
             "client_secret": STRAVA_CLIENT_SECRET,
-            "grant_type": "refresh_token",
+            "grant_type":    "refresh_token",
             "refresh_token": STRAVA_REFRESH_TOKEN
         }
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    r.raise_for_status()
+    return r.json()["access_token"]
 
 def fetch_all_runs(token: str) -> list[dict]:
     runs = []
     page = 1
     headers = {"Authorization": f"Bearer {token}"}
     while True:
-        resp = requests.get(
+        r = requests.get(
             f"https://www.strava.com/api/v3/clubs/{STRAVA_CLUB_ID}/activities",
             headers=headers,
             params={"page": page, "per_page": 200}
         )
-        resp.raise_for_status()
-        batch = resp.json()
+        r.raise_for_status()
+        batch = r.json()
         if not batch:
             break
         runs.extend(a for a in batch if a.get("type") == "Run")
@@ -61,9 +61,9 @@ def fetch_all_runs(token: str) -> list[dict]:
 def aggregate_distances(runs: list[dict]) -> list[dict]:
     totals = {}
     for a in runs:
-        athlete = a["athlete"]
-        aid = athlete["id"]
-        name = f"{athlete.get('firstname','')} {athlete.get('lastname','')}".strip()
+        ath = a["athlete"]
+        aid = ath["id"]
+        name = f"{ath.get('firstname','')} {ath.get('lastname','')}".strip()
         dist_m = a.get("distance", 0.0)
         totals.setdefault(aid, {"name": name, "meters": 0.0})
         totals[aid]["meters"] += dist_m
@@ -74,7 +74,25 @@ def aggregate_distances(runs: list[dict]) -> list[dict]:
         athletes.append({"name": v["name"], "miles": miles})
     return sorted(athletes, key=lambda x: x["miles"], reverse=True)
 
-# ─── Notion Sync ───────────────────────────────────────────────────────────────
+# ─── Notion: Activities Log ────────────────────────────────────────────────────
+def create_activity_page():
+    now = datetime.now()
+    time_str = now.strftime("%H:%M:%S")
+    date_str = now.strftime("%-m/%-d/%Y")
+    title = f"Activity (Called {time_str} – {date_str})"
+    payload = {
+        "parent": {"database_id": ACTIVITIES_DB_ID},
+        "properties": {
+            "Name": {                       # your Activities DB title prop
+                "title": [{"text": {"content": title}}]
+            }
+        }
+    }
+    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
+    r.raise_for_status()
+    print(f"🆕 Logged Activity: “{title}”")
+
+# ─── Notion: Leaderboard Sync ──────────────────────────────────────────────────
 def archive_old_pages():
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     cursor = None
@@ -129,32 +147,17 @@ def push_totals_row(athletes: list[dict]):
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
     r.raise_for_status()
 
-def create_sync_page():
-    now = datetime.now()
-    title = f"Sync Called {now.strftime('%H:%M:%S')} – {now.strftime('%-m/%-d/%Y')}"
-    payload = {
-        "parent": {"database_id": ACTIVITIES_DB_ID},
-        "properties": {
-            "Name": {
-                "title": [{"text": {"content": title}}]
-            }
-        }
-    }
-    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-    r.raise_for_status()
-    print(f"🆕 Created sync page: {title}")
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    # 0) Log this invocation
-    create_sync_page()
+    # 1) Log this run
+    create_activity_page()
 
-    # 1) Fetch and aggregate
+    # 2) Fetch & aggregate
     token = refresh_strava_token()
-    runs = fetch_all_runs(token)
+    runs  = fetch_all_runs(token)
     athletes = aggregate_distances(runs)
 
-    # 2) Rebuild leaderboard
+    # 3) Rebuild leaderboard
     archive_old_pages()
     push_athlete_rows(athletes)
     push_totals_row(athletes)
