@@ -1,0 +1,31 @@
+name: Sync Strava → Notion Leaderboard
+
+on:
+  schedule:
+    - cron: '0 * * * *'      # every hour
+  workflow_dispatch:        # manual “Run workflow” button
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run leaderboard sync
+        env:
+          STRAVA_CLIENT_ID:     ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
+          STRAVA_CLUB_ID:       ${{ secrets.STRAVA_CLUB_ID }}
+          NOTION_TOKEN:         ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID:         ${{ secrets.NOTION_DB_ID }}
+        run: python leaderboard.py
