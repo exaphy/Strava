@@ -4,7 +4,7 @@ import json
 import requests
 from datetime import datetime
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
+# ─── Configuration (via environment variables) ─────────────────────────────────
 STRAVA_CLIENT_ID     = os.getenv("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 STRAVA_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
@@ -78,27 +78,28 @@ def aggregate_distances(runs: list[dict]) -> list[dict]:
 # ─── Notion: Activities Log (DEBUGGING ENABLED) ────────────────────────────────
 def create_activity_page():
     now = datetime.now()
-    title = f"Activity (Called {now.strftime('%H:%M:%S')} – {now.strftime('%-m/%-d/%Y')})"
+    time_str = now.strftime("%H:%M:%S")
+    date_str = now.strftime("%-m/%-d/%Y")
+    title = f"Activity (Called {time_str} – {date_str})"
     payload = {
         "parent": {"database_id": ACTIVITIES_DB_ID},
         "properties": {
-            "Name": {  # adjust this key if your title prop is named differently
+            "Name": {  # adjust if your Activities DB title prop is named differently
                 "title": [{"text": {"content": title}}]
             }
         }
     }
 
-    # DEBUG: print payload
+    print("▶️ ACTIVITIES_DB_ID:", ACTIVITIES_DB_ID)
     print("▶️ POST /v1/pages payload:")
     print(json.dumps(payload, indent=2))
 
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
 
-    # DEBUG: print response status and body
     print(f"◀️ Response status: {r.status_code}")
     try:
         print("◀️ Response body:", json.dumps(r.json(), indent=2))
-    except Exception:
+    except ValueError:
         print("◀️ Response text:", r.text)
 
     r.raise_for_status()
@@ -161,14 +162,15 @@ def push_totals_row(athletes: list[dict]):
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    create_activity_page()        # will now log payload & response
+    print("▶️ NOTION_DB_ID:", NOTION_DB_ID)
+    create_activity_page()
     token = refresh_strava_token()
     runs  = fetch_all_runs(token)
     athletes = aggregate_distances(runs)
     archive_old_pages()
     push_athlete_rows(athletes)
     push_totals_row(athletes)
-    print(f"✅ Leaderboard updated: {len(athletes)} athletes + Totals")
+    print(f"✅ Leaderboard updated: {len(athletes)} athletes + Totals (processed {len(runs)} runs)")
 
 if __name__ == "__main__":
     main()
