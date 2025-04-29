@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 from datetime import datetime
 
@@ -74,20 +75,34 @@ def aggregate_distances(runs: list[dict]) -> list[dict]:
         athletes.append({"name": v["name"], "miles": miles})
     return sorted(athletes, key=lambda x: x["miles"], reverse=True)
 
-# ─── Notion: Activities Log ────────────────────────────────────────────────────
+# ─── Notion: Activities Log (DEBUGGING ENABLED) ────────────────────────────────
 def create_activity_page():
     now = datetime.now()
     title = f"Activity (Called {now.strftime('%H:%M:%S')} – {now.strftime('%-m/%-d/%Y')})"
     payload = {
         "parent": {"database_id": ACTIVITIES_DB_ID},
         "properties": {
-            "Title": {                # <— use YOUR actual prop name here  
+            "Name": {  # adjust this key if your title prop is named differently
                 "title": [{"text": {"content": title}}]
             }
         }
     }
+
+    # DEBUG: print payload
+    print("▶️ POST /v1/pages payload:")
+    print(json.dumps(payload, indent=2))
+
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
+
+    # DEBUG: print response status and body
+    print(f"◀️ Response status: {r.status_code}")
+    try:
+        print("◀️ Response body:", json.dumps(r.json(), indent=2))
+    except Exception:
+        print("◀️ Response text:", r.text)
+
     r.raise_for_status()
+    print(f"🆕 Created Activity page: “{title}”")
 
 # ─── Notion: Leaderboard Sync ──────────────────────────────────────────────────
 def archive_old_pages():
@@ -146,19 +161,13 @@ def push_totals_row(athletes: list[dict]):
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    # 1) Log this run
-    create_activity_page()
-
-    # 2) Fetch & aggregate
+    create_activity_page()        # will now log payload & response
     token = refresh_strava_token()
     runs  = fetch_all_runs(token)
     athletes = aggregate_distances(runs)
-
-    # 3) Rebuild leaderboard
     archive_old_pages()
     push_athlete_rows(athletes)
     push_totals_row(athletes)
-
     print(f"✅ Leaderboard updated: {len(athletes)} athletes + Totals")
 
 if __name__ == "__main__":
