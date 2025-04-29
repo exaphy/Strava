@@ -62,11 +62,15 @@ def fetch_all_runs(token: str) -> list[dict]:
 def aggregate_distances(runs: list[dict]) -> list[dict]:
     totals = {}
     for a in runs:
-        ath = a["athlete"]
-        aid = ath["id"]
-        name = f"{ath.get('firstname','')} {ath.get('lastname','')}".strip()
+        athlete = a.get("athlete") or {}
+        aid = athlete.get("id")
+        if aid is None:
+            print("⚠️ Skipping activity missing athlete id:", a)
+            continue
+        name = f"{athlete.get('firstname','')} {athlete.get('lastname','')}".strip()
         dist_m = a.get("distance", 0.0)
-        totals.setdefault(aid, {"name": name, "meters": 0.0})
+        if aid not in totals:
+            totals[aid] = {"name": name, "meters": 0.0}
         totals[aid]["meters"] += dist_m
 
     athletes = []
@@ -162,15 +166,23 @@ def push_totals_row(athletes: list[dict]):
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    print("ENV check:", {k: os.environ.get(k) for k in ["NOTION_DB_ID","ACTIVITIES_DB_ID"]})
+    # Verify env
     print("▶️ NOTION_DB_ID:", NOTION_DB_ID)
+    print("▶️ ACTIVITIES_DB_ID:", ACTIVITIES_DB_ID)
+
+    # Create activity log
     create_activity_page()
-    token = refresh_strava_token()
-    runs  = fetch_all_runs(token)
+
+    # Fetch & aggregate distances
+    token    = refresh_strava_token()
+    runs     = fetch_all_runs(token)
     athletes = aggregate_distances(runs)
+
+    # Rebuild leaderboard
     archive_old_pages()
     push_athlete_rows(athletes)
     push_totals_row(athletes)
+
     print(f"✅ Leaderboard updated: {len(athletes)} athletes + Totals (processed {len(runs)} runs)")
 
 if __name__ == "__main__":
