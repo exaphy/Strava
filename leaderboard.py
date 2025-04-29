@@ -21,7 +21,7 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ─── STRAVA AUTH ──────────────────────────────────────────────────────────────
+# ─── STRAVA AUTH WITH DEBUG ───────────────────────────────────────────────────
 def refresh_strava_token():
     payload = {
         "client_id":     STRAVA_CLIENT_ID,
@@ -37,8 +37,9 @@ def refresh_strava_token():
 
 # ─── FETCH & DETAIL-RICHEN RUNS ───────────────────────────────────────────────
 def fetch_all_runs(token):
-    # 1) fetch summaries
     hdr, runs, page = {"Authorization":f"Bearer {token}"}, [], 1
+
+    # 1) fetch summary list
     while True:
         r = requests.get(
             f"https://www.strava.com/api/v3/clubs/{STRAVA_CLUB_ID}/activities",
@@ -48,25 +49,36 @@ def fetch_all_runs(token):
             raise RuntimeError("Unauthorized: token invalid or club ID wrong")
         r.raise_for_status()
         batch = r.json()
-        if not batch: break
+        if not batch:
+            break
         runs.extend(a for a in batch if a.get("type")=="Run")
         page += 1
         time.sleep(0.5)
 
-    # 2) for any run missing start_date_local or athlete.id, fetch full details
+    # 2) detail-fetch only those that have an ID but miss critical fields
     detailed = []
     for a in runs:
-        need_fetch = ("start_date_local" not in a) or ("athlete" not in a) or ("id" not in a["athlete"])
-        if need_fetch:
-            act_id = a.get("id")
+        act_id = a.get("id")
+        if not act_id:
+            print("⚠️ Skipping summary without id:", a)
+            continue
+
+        missing = False
+        if "start_date_local" not in a:
+            missing = True
+        if "athlete" not in a or not isinstance(a["athlete"], dict) or "id" not in a["athlete"]:
+            missing = True
+
+        if missing:
             print(f"🐛 fetching full details for activity id {act_id}")
             rd = requests.get(f"https://www.strava.com/api/v3/activities/{act_id}",
-                              headers={"Authorization":f"Bearer {token}"})
+                              headers=hdr)
             rd.raise_for_status()
             detailed.append(rd.json())
-            time.sleep(0.2)  # small pause to respect rate limits
+            time.sleep(0.2)
         else:
             detailed.append(a)
+
     return detailed
 
 # ─── UTILITIES ────────────────────────────────────────────────────────────────
@@ -78,7 +90,7 @@ def format_hhmmss(sec:int)->str:
 def meters_to_miles(m:float)->float:
     return m * 0.000621371
 
-# ─── NOTION: CREATE DB ────────────────────────────────────────────────────────
+# ─── NOTION: CREATE DATABASE ──────────────────────────────────────────────────
 def create_notion_database(title, schema):
     payload = {
         "parent": {"type":"page_id","page_id":NOTION_PARENT_PAGE_ID},
@@ -95,10 +107,10 @@ def create_notion_database(title, schema):
 def push_rows(db_id, rows):
     for row in rows:
         props = {
-            "Athlete":       {"title":[{"text":{"content":row["name"]}}]},
-            "Distance (mi)": {"number":round(row["miles"],2)},
+            "Athlete":       {"title":     [{"text":{"content":row["name"]}}]},
+            "Distance (mi)": {"number":    round(row["miles"],2)},
             "Moving Time":   {"rich_text":[{"text":{"content":row["moving"]}}]},
-            "Elapsed Time":  {"rich_text":[{"text":{"content":row["elapsed"]}}]},
+            "Elapsed Time":  {"rich_text":[{"text":{"content":row["elapsed"]}}]}
         }
         r = requests.post("https://api.notion.com/v1/pages",
                           headers=HEADERS,
@@ -108,39 +120,40 @@ def push_rows(db_id, rows):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    # date bounds in PT
+    # 1) compute date window in PT
     start_dt = datetime.fromisoformat(START_DATE_STR).replace(tzinfo=PACIFIC)
     end_dt   = start_dt + timedelta(days=1)
     print(f"🗓️  Syncing all club runs on {start_dt.date()} (PT)")
 
-    # auth & fetch
+    # 2) auth & fetch
     token = refresh_strava_token()
     runs  = fetch_all_runs(token)
-    print(f"🔍  Fetched & detailed {len(runs)} runs total")
+    print(f"🔍  Fetched {len(runs)} detailed runs")
 
-    # filter & group
+    # 3) filter & group by activity name
     groups = {}
     for a in runs:
         local = parser.isoparse(a["start_date_local"]).astimezone(PACIFIC)
         if not (start_dt <= local < end_dt):
             continue
+
         name = a.get("name","Unnamed Activity")
         ath  = a["athlete"]
         aid  = ath["id"]
         groups.setdefault(name, {})[aid] = groups[name].get(aid, {
             "name": f"{ath.get('firstname','')} {ath.get('lastname','')}".strip(),
-            "meters":0,"moving":0,"elapsed":0
+            "meters":0, "moving":0, "elapsed":0
         })
         rec = groups[name][aid]
-        rec["meters"]  += a["distance"]
-        rec["moving"]  += a["moving_time"]
-        rec["elapsed"] += a["elapsed_time"]
+        rec["meters"]  += a.get("distance",0)
+        rec["moving"]  += a.get("moving_time",0)
+        rec["elapsed"] += a.get("elapsed_time",0)
 
     if not groups:
         print("⚠️ No runs found on that date. Exiting.")
         return
 
-    # schema
+    # 4) create & populate one DB per activity
     schema = {
         "Athlete":       {"title": {}},
         "Distance (mi)": {"number":{"format":"number"}},
@@ -148,7 +161,6 @@ def main():
         "Elapsed Time":  {"rich_text": {}},
     }
 
-    # one DB per activity
     for activity_name, athletes in groups.items():
         title = f"{activity_name} – {start_dt.strftime('%-m/%-d/%Y')}"
         db_id = create_notion_database(title, schema)
